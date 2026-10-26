@@ -1,0 +1,104 @@
+# Bridge (server/): test every change; on main, publish a GitHub release with standalone
+# kits for macOS and Linux. Version = SERIES.<COUNT_OFFSET + commits touching server/>;
+# the offset continues the numbering of the monorepo this was split from. Bump SERIES by hand.
+name: Bridge release
+on:
+  push:
+    branches: [main]
+    paths: [server/**, protocol/**, .github/**]
+  pull_request:
+    paths: [server/**, .github/workflows/server.yml]
+  workflow_dispatch:
+concurrency:
+  group: server-release-${{ github.ref }}
+  cancel-in-progress: false
+permissions: { contents: read }
+env:
+  SERIES: "0.1"
+  BUN_VERSION: "1.4.4"
+  COUNT_OFFSET: "20"
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "${{ env.BUN_VERSION }}" }
+      - id: v
+        run: echo "version=$(.github/scripts/component-release.sh version "$SERIES" server)" >> "$GITHUB_OUTPUT"
+      - working-directory: server
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun test
+
+  linux:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "${{ env.BUN_VERSION }}" }
+      - working-directory: server
+        run: |
+          bun install --frozen-lockfile
+          for t in bun-linux-x64 bun-linux-arm64; do scripts/package-release.sh "${{ needs.test.outputs.version }}" "$t" ../dist; done
+          # Smoke test the x64 kit on this runner.
+          mkdir -p /tmp/kit && unzip -q ../dist/*-linux-x64.zip -d /tmp/kit
+          /tmp/kit/agent-remote/herdr-remote --help | grep -F "host ${{ needs.test.outputs.version }}"
+          /tmp/kit/agent-remote/herdr-remote init --state /tmp/kit/state --url https://127.0.0.1:18443 --port 18443
+      - uses: actions/upload-artifact@v4
+        with: { name: bridge-linux, path: dist/*.zip, if-no-files-found: error }
+
+  macos:
+    needs: test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with: { bun-version: "${{ env.BUN_VERSION }}" }
+      - working-directory: server
+        run: |
+          bun install --frozen-lockfile
+          for t in bun-darwin-arm64 bun-darwin-x64; do scripts/package-release.sh "${{ needs.test.outputs.version }}" "$t" ../dist; done
+          # This runner is Apple silicon: run the arm64 kit with only the stock system tools.
+          mkdir -p /tmp/kit && unzip -q ../dist/*-macos-arm64.zip -d /tmp/kit
+          env -i HOME=/tmp/kit PATH=/usr/bin:/bin:/usr/sbin:/sbin /tmp/kit/agent-remote/herdr-remote --help | grep -F "host ${{ needs.test.outputs.version }}"
+          env -i HOME=/tmp/kit PATH=/usr/bin:/bin:/usr/sbin:/sbin /tmp/kit/agent-remote/herdr-remote init --state /tmp/kit/state --url https://127.0.0.1:18443 --port 18443
+      - uses: actions/upload-artifact@v4
+        with: { name: bridge-macos, path: dist/*.zip, if-no-files-found: error }
+
+  release:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [test, linux, macos]
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          tag="server-v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then echo "$tag already released"; exit 0; fi
+          (cd dist && sha256sum *.zip > SHA256SUMS)
+          {
+            echo "Standalone AI Agent Remote bridge $VERSION. Download the zip for your computer, unzip it and follow README.txt (\`./herdr-remote up\`)."
+            echo
+            echo "| Computer | File |"
+            echo "|---|---|"
+            echo "| Mac with Apple silicon (M1 and later) | agent-remote-bridge-$VERSION-macos-arm64.zip |"
+            echo "| Intel Mac | agent-remote-bridge-$VERSION-macos-x64.zip |"
+            echo "| Linux x86-64 | agent-remote-bridge-$VERSION-linux-x64.zip |"
+            echo "| Linux ARM64 | agent-remote-bridge-$VERSION-linux-arm64.zip |"
+            echo
+            echo "## Changes"
+            .github/scripts/component-release.sh notes server-v server
+          } > notes.md
+          gh release create "$tag" dist/*.zip dist/SHA256SUMS --target "$GITHUB_SHA" --title "Bridge $VERSION" --notes-file notes.md

@@ -1,0 +1,14 @@
+# AI Agent Remote bridge as a systemd user service. Edit ExecStart to where you unpacked it.
+[Unit]
+Description=AI Agent Remote bridge (Herdr, discoverable on the local network)
+After=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/agent-remote/herdr-remote up
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

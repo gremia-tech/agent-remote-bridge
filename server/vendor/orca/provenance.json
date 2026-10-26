@@ -1,0 +1,54 @@
+{
+  "repository": "https://github.com/stablyai/orca",
+  "revision": "071747853f5995ee233b36751613f09a60007c2b",
+  "tag": "v1.4.237",
+  "license": "MIT",
+  "scope": "Unmodified upstream paired E2EE v2 handshake/crypto with type dependencies. Adapter uses v2 only; no legacy fallback.",
+  "files": [
+    {
+      "source": "src/shared/device-key-proof.ts",
+      "file": "device-key-proof.ts",
+      "sha256": "d76202fbf531ab279c9c176bbc77434225b4692f0e796a16d2169ba489999f9b"
+    },
+    {
+      "source": "src/shared/e2ee-crypto.ts",
+      "file": "e2ee-crypto.ts",
+      "sha256": "4afedec023059d68f432ae447ccc91c08aee6ec80b007ab16f046c21a84092ff"
+    },
+    {
+      "source": "src/shared/mobile-e2ee-v2-contract.ts",
+      "file": "mobile-e2ee-v2-contract.ts",
+      "sha256": "038fb782cd7eb86de5b7e5709467fbc7d8a1b731d748a45bbbabeef9d700f534"
+    },
+    {
+      "source": "src/shared/mobile-e2ee-v2-framing.ts",
+      "file": "mobile-e2ee-v2-framing.ts",
+      "sha256": "49681ecd7c139faa55543dda290e12fccd86808d4367abfdb7ccba9c45a2d518"
+    },
+    {
+      "source": "src/shared/mobile-e2ee-v2-node-key-schedule.ts",
+      "file": "mobile-e2ee-v2-node-key-schedule.ts",
+      "sha256": "98a39728b4661f4cff6d35a4bba6f5f2771c38e1be27347379f2cab1c91c3ce8"
+    },
+    {
+      "source": "src/shared/paired-e2ee-client-handshake.ts",
+      "file": "paired-e2ee-client-handshake.ts",
+      "sha256": "c81269a25197e85622df96a0e30ae325237dfe9ce7e899343d46cf090eba120d"
+    },
+    {
+      "source": "src/shared/paired-e2ee-node-primitives.ts",
+      "file": "paired-e2ee-node-primitives.ts",
+      "sha256": "8583f5087585543881d711803988c4b5b913f14f7f9cfe79cd3d1d5dfa800565"
+    },
+    {
+      "source": "src/shared/paired-e2ee-primitives.ts",
+      "file": "paired-e2ee-primitives.ts",
+      "sha256": "360532941c07b4240c773954adbe173bb4db56fd6a89a7cfbc47262dde29a9b0"
+    },
+    {
+      "source": "src/shared/paired-e2ee-v2-client-session.ts",
+      "file": "paired-e2ee-v2-client-session.ts",
+      "sha256": "3286a282c4790d6f58ce1433ce6b8b0906832380bfdb815d567d81f1b47fbe9c"
+    }
+  ]
+}

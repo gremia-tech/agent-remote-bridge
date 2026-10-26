@@ -1,0 +1,23 @@
+# AI Agent Remote bridge for the Herdr you use on this computer, discoverable on your Wi-Fi.
+#
+#   cp deploy/systemd/herdr-remote.service ~/.config/systemd/user/
+#   # edit WorkingDirectory/ExecStart if this checkout or bun live elsewhere
+#   systemctl --user daemon-reload && systemctl --user enable --now herdr-remote
+#
+# The first start creates ~/.local/share/herdr-remote (TLS for <hostname>.local and your LAN
+# addresses). Phones on the same network see this computer under "On this network" and pair
+# with the 6-digit code that pops up here. Stop advertising with: systemctl --user stop herdr-remote
+[Unit]
+Description=AI Agent Remote bridge (Herdr, discoverable on the local network)
+After=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h/agent-remote-server/server
+ExecStart=%h/.bun/bin/bun src/cli.ts up
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

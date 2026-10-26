@@ -1,0 +1,15 @@
+# User service: ~/.config/systemd/user/herdr-remote.service
+[Unit]
+Description=Herdr Remote paired host
+After=network-online.target
+[Service]
+Type=simple
+# Replace with absolute paths. Run as the same OS user as Herdr.
+ExecStart=/ABSOLUTE/PATH/herdr-remote serve --state /ABSOLUTE/PATH/private-host-state
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+# Cannot use PrivateTmp: it can hide Herdr's user-owned sockets.
+[Install]
+WantedBy=default.target
