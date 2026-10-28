@@ -46,6 +46,23 @@ The default scope is read, the invitation lifetime is 300 seconds, and `--ttl` p
 
 A revocation made through another CLI process affects new requests immediately and closes existing sockets and controller helpers within one second. No token is accepted in a query parameter or from a reverse proxy identity header. The server rejects browser Origin headers, including otherwise valid requests. `/health` reveals only bridge availability and the protocol version.
 
+## Away from your network: reverse relay
+
+When the computer is behind NAT or a work firewall, run a relay somewhere both can reach (for example behind Cloudflare Tunnel or any HTTPS reverse proxy) and let the bridge dial out to it:
+
+```sh
+# relay server
+herdr-remote relay serve --listen 127.0.0.1 --port 8788      # put HTTPS/WSS in front of /v1/tunnel and /v1/host
+herdr-remote relay profile --public-url wss://relay.example.com > relay.json && chmod 600 relay.json
+# the computer (copy relay.json there privately)
+herdr-remote init --url https://10.89.0.1:8443 --listen 127.0.0.1 --port 8443
+herdr-remote relay join relay.json
+herdr-remote serve                      # keeps an outbound WSS connection to the relay, reconnecting with backoff
+herdr-remote pair --scope control --qr  # scan on the phone; the invitation carries the relay route
+```
+
+The bridge needs only outbound HTTPS (443); `HTTPS_PROXY` is honoured, and a TLS-inspecting proxy's root goes in `NODE_EXTRA_CA_CERTS`. The relay forwards the bridge's own TLS bytes: the phone still pins the bridge certificate from the QR and still presents its device token, so the relay or anything in front of it cannot read or type into terminals. Bridge and phone use separate relay tokens. The bridge URL is the pinned name inside the tunnel, not a routed address; an IP literal with a matching certificate SAN is the tested form on iOS. `relay status`/`relay leave` inspect or remove the profile; `pair --no-relay` makes a direct invitation.
+
 ## Control and recovery
 
 Observation uses a read-only Herdr helper and does not take over a desktop controller. A control-scoped device must explicitly acquire a pane lease; conflicts require an explicit takeover. Leases expire after 60 seconds without activity/renewal and release on revocation or shutdown. A bridge permits at most 64 controller helpers, eight per device, 64 live sockets, four per device, and 64 concurrent HTTP requests. Terminal streams and replay caches are bounded. If a controller replay cache is no longer complete, a resubscription starts a fresh read-only stream while retaining that device's explicit control lease.

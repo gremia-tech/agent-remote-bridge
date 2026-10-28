@@ -31,6 +31,13 @@ Codex, OpenCode, Pi, Gemini, Qwen and others) are recognised. Only the backend y
 A single-file binary works the same way:
 `bun build src/cli.ts --compile --outfile herdr-remote`, then `./herdr-remote up`.
 
+## Away from your network
+
+Behind NAT or a work firewall? Run `herdr-remote relay serve` on a server both sides can reach
+(behind HTTPS, e.g. Cloudflare Tunnel) and `herdr-remote relay join relay.json` on the computer;
+the bridge dials out and the phone still pins the computer's own certificate. See
+[`server/README.md`](server/README.md#away-from-your-network-reverse-relay).
+
 ## More
 
 - [`server/README.md`](server/README.md): security model, pairing (QR or nearby code),
