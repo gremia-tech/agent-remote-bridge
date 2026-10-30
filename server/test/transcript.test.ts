@@ -50,3 +50,14 @@ test('Qwen Code sessions are found by id and keep Gemini-style parts',async()=>{
   expect(t.messages.map((m:any)=>[m.kind,m.text])).toEqual([['message','list files'],['message','Listing'],['tool_call','{"command":"ls"}'],['tool_result','a.ts']]);
   expect(JSON.stringify(t)).not.toContain('SECRET');expect(JSON.stringify(t)).not.toContain('NOT MINE');
 });
+test('earlier pages walk back to the session start without gaps or repeats',async()=>{const f=await setup();let body=line(meta);for(let i=0;i<650;i++){body+=line(message(`m${i}`));if(i%7===0)body+='{"not json\n';}await writeFile(f.path,body);
+ const a:any=await readTranscript(f.home,ref,'identity',undefined,undefined,true);expect(a.messages.length).toBe(200);expect(typeof a.earlier).toBe('string');
+ const pages=[a.messages];let earlier=a.earlier,guard=0;
+ while(earlier&&guard++<10){const p:any=await readTranscript(f.home,ref,'identity',undefined,undefined,earlier);expect(p.reset).toBe(false);expect(p.cursor).toBeNull();pages.unshift(p.messages);earlier=p.earlier;}
+ expect(earlier).toBeNull();const all=pages.flat().map((m:any)=>m.text);expect(all).toEqual(Array.from({length:650},(_,i)=>`m${i}`));expect(new Set(pages.flat().map((m:any)=>m.id)).size).toBe(650);
+ // Appending keeps an earlier page valid; rewriting what it covers does not.
+ await appendFile(f.path,line(message('newer')));const again:any=await readTranscript(f.home,ref,'identity',undefined,undefined,a.earlier);expect(again.reset).toBe(false);expect(again.messages.at(-1).text).toBe('m449');
+ await writeFile(f.path,body.replace('"m3"','"mX"'));const stale:any=await readTranscript(f.home,ref,'identity',undefined,undefined,a.earlier);expect(stale.reset).toBe(true);expect(stale.messages).toEqual([]);
+ const other:any=await readTranscript(f.home,ref,'other identity',undefined,undefined,a.earlier);expect(other.reset).toBe(true);
+ const junk:any=await readTranscript(f.home,ref,'identity',undefined,undefined,'bad');expect(junk.reset).toBe(true);});
+test('a tail that reaches the session start has no earlier page',async()=>{const f=await setup();await writeFile(f.path,line(meta)+line(message('one'))+line(message('two')));const a:any=await readTranscript(f.home,ref,'identity',undefined,undefined,true);expect(a.messages.map((m:any)=>m.text)).toEqual(['one','two']);expect(a.earlier).toBeNull();expect(a.truncated).toBe(false);});

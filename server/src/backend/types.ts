@@ -35,7 +35,8 @@ export interface HostBackend {
   snapshot(session?: string): Promise<Record<string, unknown>>;
   identity(session: string | undefined, paneId: string): Promise<PaneIdentity>;
   output(session: string | undefined, paneId: string, lines?: number): Promise<Record<string, unknown>>;
-  transcript(session: string | undefined, paneId: string, cursor?: string, tail?: boolean): Promise<Record<string, unknown>>;
+  /** `tail` true reads the newest page; a string is the `earlier` value of a page and reads the one before it. */
+  transcript(session: string | undefined, paneId: string, cursor?: string, tail?: boolean | string): Promise<Record<string, unknown>>;
   git(session: string | undefined, workspaceId: string, paneId?: string): Promise<Record<string, unknown>>;
   diff(session: string | undefined, workspaceId: string, path: string, paneId?: string): Promise<Record<string, unknown>>;
   files(session: string | undefined, workspaceId: string, path: string, paneId?: string): Promise<Record<string, unknown>>;

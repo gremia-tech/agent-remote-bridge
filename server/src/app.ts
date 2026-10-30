@@ -250,7 +250,7 @@ export function createBridge(options:BridgeOptions) {
           if(parts[1]==="operations" && parts.length===3){if(!UUID.test(parts[2]!))throw new BridgeError("invalid_request","Invalid operation ID");return reply(state.operation(device.id,parts[2]!));}
           if(parts[1]==="panes" && parts.length===4){
             if(parts[3]==="output"){const lines=url.searchParams.has("lines")?integer(Number(url.searchParams.get("lines")),1,2000):240;return reply(await deadline(backend.output(session,parts[2]!,lines)));}
-            if(parts[3]==="transcript"){const cursor=url.searchParams.has("cursor")?str(url.searchParams.get("cursor"),4096):undefined;return reply(await deadline(backend.transcript(session,parts[2]!,cursor,url.searchParams.get("tail")==="1")));}
+            if(parts[3]==="transcript"){const cursor=url.searchParams.has("cursor")?str(url.searchParams.get("cursor"),4096):undefined;const earlier=url.searchParams.has("before")?str(url.searchParams.get("before"),4096):undefined;return reply(await deadline(backend.transcript(session,parts[2]!,earlier?undefined:cursor,earlier??url.searchParams.get("tail")==="1")));}
           }
           if(parts[1]==="workspaces" && parts.length===4){
             const path=url.searchParams.has("path")?str(url.searchParams.get("path"),4096,0):"";

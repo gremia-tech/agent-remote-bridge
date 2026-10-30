@@ -118,8 +118,11 @@ async function locate(root:string, ref:NativeSession):Promise<string|null> {
 const STORAGE={claude:'.claude/projects',codex:'.codex/sessions',pi:'.pi/agent/sessions',qwen:'.qwen/projects'} as const;
 export type TranscriptRoots=Partial<Record<keyof typeof STORAGE,string>>;
 interface Cursor {v:1;binding:string;file:string;offset:number;prefix:string;drop?:boolean}
-/** `tail` (without a cursor) starts from the newest records instead of the session start. */
-export async function readTranscript(home:string, native:NativeSession|undefined, identityToken:string,cursor?:string,roots?:TranscriptRoots,tail=false):Promise<Record<string,unknown>> {
+/** Marks where a page read backwards began, so the next page back ends there. The prefix hash proves the log before it is unchanged. */
+interface Earlier {v:1;binding:string;file:string;before:number;prefix:string}
+/** `tail` (without a cursor) starts from the newest records instead of the session start; a string is an
+ *  `earlier` value from a previous tail page and reads the page before it. */
+export async function readTranscript(home:string, native:NativeSession|undefined, identityToken:string,cursor?:string,roots?:TranscriptRoots,tail:boolean|string=false):Promise<Record<string,unknown>> {
   const none=(reason:string)=>({source:native?.agent ?? null,supported:false,reason,messages:[],cursor:null,reset:!!cursor,truncated:false,hasMore:false});
   if(!native||!(native.agent in STORAGE)||native.source!==`herdr:${native.agent}`)return none('native_session_unavailable');
   const root=roots?.[native.agent as keyof typeof STORAGE]??join(home,STORAGE[native.agent as keyof typeof STORAGE]);
@@ -152,11 +155,20 @@ export async function readTranscript(home:string, native:NativeSession|undefined
       }
     }catch{}
     const messages:TranscriptMessage[]=[];let truncated=false;let pending=false;let unread=false;
-    if(tail&&!cursor) {
-      // Read whole lines backwards from the end until enough has been said.
-      const records:TranscriptMessage[][]=[];let said=0,pos=stat.size,end=-1,e=0;let buf=Buffer.alloc(0);
+    let earlier:string|null=null;
+    if(typeof tail==='string'||(tail&&!cursor)) {
+      // A tail reads back from the end of the log; `earlier` (a string) reads back from where a previous page began.
+      let endAt=stat.size;
+      if(typeof tail==='string') {
+        let c:Earlier|undefined;try{c=JSON.parse(Buffer.from(tail.slice(0,2048),'base64url').toString()) as Earlier;}catch{}
+        if(!c||c.v!==1||c.binding!==binding||c.file!==file||!Number.isSafeInteger(c.before)||c.before<=0||c.before>stat.size||await prefixHash(c.before)!==c.prefix)
+          return {source:native.agent,supported:true,messages:[],cursor:null,earlier:null,reset:true,truncated:false,hasMore:false};
+        endAt=c.before;
+      }
+      // Read whole lines backwards until enough has been said.
+      const records:{start:number;messages:TranscriptMessage[]}[]=[];let said=0,pos=endAt,end=-1,e=0;let buf=Buffer.alloc(0);
       while(said<MAX_MESSAGES) {
-        if(pos>0&&stat.size-pos<TAIL_SCAN){const size=Math.min(PAGE,pos);pos-=size;const chunk=Buffer.alloc(size);const r=await handle.read(chunk,0,size,pos);buf=Buffer.concat([chunk.subarray(0,r.bytesRead),buf.subarray(0,e)]);e=buf.length;}
+        if(pos>0&&endAt-pos<TAIL_SCAN){const size=Math.min(PAGE,pos);pos-=size;const chunk=Buffer.alloc(size);const r=await handle.read(chunk,0,size,pos);buf=Buffer.concat([chunk.subarray(0,r.bytesRead),buf.subarray(0,e)]);e=buf.length;}
         else if(pos>0)break;
         if(end<0){const nl=buf.lastIndexOf(10);if(nl<0){if(pos===0)break;continue;}pending=nl+1<buf.length;end=pos+nl+1;e=nl+1;}
         while(e>0&&said<MAX_MESSAGES) {
@@ -169,17 +181,24 @@ export async function readTranscript(home:string, native:NativeSession|undefined
             if((native.agent==='claude'||native.agent==='qwen')&&row.sessionId&&row.sessionId!==nativeId)continue;
             const normalized=normalizeTranscriptRecord(native.agent,row,`${nativeId}:${pos+start}`)
               .map(m=>spoken(m)?m:{...m,text:trimText(m.text,TAIL_TOOL_TEXT)});
-            if(normalized.length){records.push(normalized);said+=normalized.filter(spoken).length;}
+            if(normalized.length){records.push({start:pos+start,messages:normalized});said+=normalized.filter(spoken).length;}
           }catch{}
         }
         if(pos===0&&e===0)break;
       }
-      for(const record of records.reverse())messages.push(...record);
-      // Over the response budget, shorten the oldest tool activity first; drop messages only as a last resort.
-      let bytes=Buffer.byteLength(JSON.stringify(messages));
-      for(let i=0;i<messages.length&&bytes>MAX_RESPONSE_BYTES;i++){const m=messages[i]!;if(spoken(m))continue;const short=trimText(m.text.split('\n',1)[0]!,160);bytes-=Buffer.byteLength(m.text)-Buffer.byteLength(short);messages[i]={...m,text:short};}
-      while(messages.length>1&&Buffer.byteLength(JSON.stringify(messages))>MAX_RESPONSE_BYTES){messages.shift();truncated=true;}
-      truncated||=pos>0||e>0;
+      records.reverse();
+      // Over the response budget, shorten the oldest tool activity first; drop whole records only as a last resort.
+      let bytes=records.reduce((n,r)=>n+Buffer.byteLength(JSON.stringify(r.messages)),0);
+      for(const r of records)for(let i=0;i<r.messages.length&&bytes>MAX_RESPONSE_BYTES;i++){const m=r.messages[i]!;if(spoken(m))continue;const short=trimText(m.text.split('\n',1)[0]!,160);bytes-=Buffer.byteLength(m.text)-Buffer.byteLength(short);r.messages[i]={...m,text:short};}
+      let dropped=false;
+      while(records.length>1&&bytes>MAX_RESPONSE_BYTES){bytes-=Buffer.byteLength(JSON.stringify(records.shift()!.messages));dropped=true;}
+      for(const r of records)messages.push(...r.messages);
+      // Where the next page back ends: the first record kept, or the earliest line looked at.
+      const from=dropped?records[0]!.start:pos+e;
+      if(from>0&&from<endAt)earlier=Buffer.from(JSON.stringify({v:1,binding,file,before:from,prefix:await prefixHash(from)} satisfies Earlier)).toString('base64url');
+      truncated||=from>0;
+      if(typeof tail==='string'){const after=await handle.stat();if(after.size<stat.size||(after.mtimeMs!==stat.mtimeMs&&after.size<=stat.size))return none('session_file_changed_during_read');
+        return {source:native.agent,supported:true,messages,cursor:null,earlier,reset:false,truncated,hasMore:earlier!==null};}
       offset=Math.max(end,0);
     } else {
       const bytes=Buffer.alloc(Math.min(PAGE,stat.size-offset)); const read=await handle.read(bytes,0,bytes.length,offset);const data=bytes.subarray(0,read.bytesRead);
@@ -209,6 +228,6 @@ export async function readTranscript(home:string, native:NativeSession|undefined
     // Appends are allowed; truncation or same-size rewrites during this read require a fresh request.
     if(end.size<stat.size||(end.mtimeMs!==stat.mtimeMs&&end.size<=stat.size))return none('session_file_changed_during_read');
     const next:Cursor={v:1,binding,file,offset,prefix:await prefixHash(offset),...(drop?{drop:true}:{})};
-    return {source:native.agent,supported:true,messages,cursor:Buffer.from(JSON.stringify(next)).toString('base64url'),reset,truncated:truncated||unread,hasMore:truncated||unread,...(pending?{pending:true}:{})};
+    return {source:native.agent,supported:true,messages,cursor:Buffer.from(JSON.stringify(next)).toString('base64url'),...(tail&&!cursor?{earlier}:{}),reset,truncated:truncated||unread,hasMore:truncated||unread,...(pending?{pending:true}:{})};
   } finally {await handle.close();}
 }

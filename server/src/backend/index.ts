@@ -112,7 +112,7 @@ export function createHerdrBackend(options:HerdrBackendOptions={}):HostBackend {
             {claimed:new Set(before.state.panes.map((x:any)=>x.agent_session?.value).filter(Boolean)),sharedFolder:before.state.panes.some((x:any)=>x.pane_id!==paneId&&x.agent===before.p.agent&&!x.agent_session&&(x.foreground_cwd||x.cwd)===cwd),title:typeof before.p.terminal_title_stripped==='string'?before.p.terminal_title_stripped:undefined,
              screen:async()=>{const r=await call(name,'pane.read',{pane_id:paneId,source:'recent_unwrapped',format:'text',lines:400});return String((r.read??r).text??'');}});
         }
-        const result=await readTranscript(home,native,before.identity.identityToken,cursor,roots,tail===true);
+        const result=await readTranscript(home,native,before.identity.identityToken,cursor,roots,typeof tail==='string'?tail:tail===true);
         if((await pane(name,paneId)).identity.identityToken!==before.identity.identityToken)throw new BackendError('identity_changed','Pane identity changed during transcript read',409);
         return {paneId,identityToken:before.identity.identityToken,...result};
       }finally{transcriptActive--;}

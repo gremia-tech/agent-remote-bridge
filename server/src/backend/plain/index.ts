@@ -162,7 +162,7 @@ export function createPlainBackend(options:PlainBackendOptions):HostBackend {
         p.session=native?{pid:agent.pid,title:p.title,native}:undefined;
       }
       if(!agent||!p.session)return {paneId:p.id,identityToken:token,source:'plain-terminal',supported:false,reason:'native_session_unavailable',messages:[],cursor:null,reset:!!cursor,truncated:false,hasMore:false};
-      return {paneId:p.id,identityToken:token,...await readTranscript(env.HOME??homedir(),p.session.native,token,cursor,{codex:join(codexHome,'sessions'),claude:join(claudeHome,'projects')},tail===true)};
+      return {paneId:p.id,identityToken:token,...await readTranscript(env.HOME??homedir(),p.session.native,token,cursor,{codex:join(codexHome,'sessions'),claude:join(claudeHome,'projects')},typeof tail==='string'?tail:tail===true)};
     },
     git:(s,w,p)=>inspect(s,w,p,root=>readWorkspaceGitStatus(w,root)) as Promise<any>,
     diff:(s,w,path,p)=>inspect(s,w,p,root=>readWorkspaceGitDiff(w,root,path)) as Promise<any>,
