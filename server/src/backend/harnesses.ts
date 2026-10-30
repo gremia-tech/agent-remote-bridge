@@ -51,8 +51,15 @@ export function harnessFor(comm:string,args:string[]):Harness|undefined {
   return undefined;
 }
 export const harnessByKind=(kind:string)=>HARNESSES.find(x=>x.kind===kind);
-/** Harnesses whose start command is on this computer's PATH (plus common per-user install folders). */
+const installedCache=new Map<string,{at:number;value:Harness[]}>();
+/** Harnesses whose start command is on this computer's PATH (plus common per-user install folders).
+ *  Every snapshot asks, and a search stats each folder for each harness, so the answer is kept for 30 s. */
 export function installedHarnesses(path=process.env.PATH,home=process.env.HOME??''):Harness[] {
   const search=[path,`${home}/.local/bin`,`${home}/.bun/bin`,`${home}/.npm-global/bin`,`${home}/.opencode/bin`,'/opt/homebrew/bin','/usr/local/bin'].filter(Boolean).join(':');
-  return HARNESSES.filter(x=>Bun.which(x.command,{PATH:search}));
+  const cached=installedCache.get(search),now=Date.now();
+  if(cached&&now-cached.at<30_000)return cached.value;
+  const value=HARNESSES.filter(x=>Bun.which(x.command,{PATH:search}));
+  if(installedCache.size>=16)installedCache.clear();
+  installedCache.set(search,{at:now,value});
+  return value;
 }

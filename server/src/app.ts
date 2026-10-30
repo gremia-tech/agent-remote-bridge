@@ -18,6 +18,15 @@ function reply(body:unknown,status=200,maximum=MAX_RESPONSE) {
   if(Buffer.byteLength(json)>maximum)throw new BridgeError("response_too_large","Response limit",413);
   return new Response(json,{status,headers:{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-Content-Type-Options":"nosniff","Referrer-Policy":"no-referrer"}});
 }
+/** Gzip JSON over 1 KB for clients that accept it. Snapshots, transcripts and terminal output are text that
+ *  shrinks several times, which matters most over a VPN or the relay; phones decompress transparently. */
+async function compressed(request:Request,response:Response):Promise<Response> {
+  if(!/\bgzip\b/i.test(request.headers.get("accept-encoding")??"") || !response.headers.get("content-type")?.startsWith("application/json"))return response;
+  const bytes=new Uint8Array(await response.arrayBuffer());
+  if(bytes.length<1024)return new Response(bytes,{status:response.status,headers:response.headers});
+  const headers=new Headers(response.headers);headers.set("Content-Encoding","gzip");headers.set("Vary","Accept-Encoding");
+  return new Response(Bun.gzipSync(bytes,{level:4}),{status:response.status,headers});
+}
 async function body(request:Request):Promise<Record<string,unknown>> {
   if(!request.headers.get("content-type")?.toLowerCase().startsWith("application/json"))throw new BridgeError("invalid_request","JSON required");
   const length=Number(request.headers.get("content-length"));if(length>MAX_BODY)throw new BridgeError("request_too_large","Body limit",413);
@@ -182,7 +191,7 @@ export function createBridge(options:BridgeOptions) {
     if(!begin.fresh)return reply(begin.operation,begin.operation.state==="pending"?202:200);
     try {
       if(!state.active(device.id))throw new BridgeError("invalid_credentials","Revoked",401);
-      const result=await deadline(dispatch(),20_000,true);
+      const result=await deadline(dispatch(),20_000,true).finally(()=>recentSnapshots.clear());
       // Serialize before accepting, so an unbounded result cannot poison the durable journal.
       if(Buffer.byteLength(JSON.stringify(result??null))>MAX_RESPONSE-1024)throw new BridgeError("delivery_unknown","Result too large",503,true);
       return reply(state.finish(device.id,id,"accepted",result??null));
@@ -192,11 +201,20 @@ export function createBridge(options:BridgeOptions) {
     hostname:options.hostname??"127.0.0.1",port:options.port??0,tls:options.tls,
     idleTimeout:30,maxRequestBodySize:MAX_BODY,
     websocket:{maxPayloadLength:16_384,idleTimeout:60,backpressureLimit:1_048_576,closeOnBackpressureLimit:true,sendPings:true,
+      // Terminal frames are text; clients that offer per-message deflate (Android) get them compressed.
+      perMessageDeflate:true,
       open(ws){sockets.add(ws);send(ws,{type:"connected",epoch});},
       message(ws,message){websocketMessage(ws,message).catch(error=>{const f=failure(error);send(ws,{type:"error",...f.body.error});});},
       close(ws){sockets.delete(ws);clearStream(ws);},
     },
     async fetch(request,server) {
+      const response=await handle(request,server);
+      return response && compressed(request,response);
+    },
+    error(){return reply({error:{code:"invalid_request",message:"The request could not be processed."}},400);},
+  });
+  async function handle(request:Request,server:Bun.Server<SocketData>):Promise<Response|undefined> {
+    {
       if(++requests>64){requests--;return reply({error:{code:"rate_limited",message:"The host is busy."}},429);}
       try {
         const url=new URL(request.url);
@@ -246,7 +264,7 @@ export function createBridge(options:BridgeOptions) {
         }
         const parts=url.pathname.split("/").filter(Boolean).map(part=>{try{return str(decodeURIComponent(part));}catch{throw new BridgeError("invalid_request","Malformed path");}});
         if(request.method==="GET") {
-          if(url.pathname==="/v1/snapshot"){const value=await deadline(backend.snapshot(session));return reply({...value,capabilities:{...(value.capabilities as object|undefined),liveInput:true,hostSizedTerminal:!!backend.paneSize},hostId:state.hostId,epoch});}
+          if(url.pathname==="/v1/snapshot"){const value=await deadline(snapshotOf(session));return reply({...value,capabilities:{...(value.capabilities as object|undefined),liveInput:true,hostSizedTerminal:!!backend.paneSize},hostId:state.hostId,epoch});}
           if(parts[1]==="operations" && parts.length===3){if(!UUID.test(parts[2]!))throw new BridgeError("invalid_request","Invalid operation ID");return reply(state.operation(device.id,parts[2]!));}
           if(parts[1]==="panes" && parts.length===4){
             if(parts[3]==="output"){const lines=url.searchParams.has("lines")?integer(Number(url.searchParams.get("lines")),1,2000):240;return reply(await deadline(backend.output(session,parts[2]!,lines)));}
@@ -308,9 +326,8 @@ export function createBridge(options:BridgeOptions) {
         }
         throw new BridgeError("not_found","Unknown route",404);
       }catch(error){const f=failure(error);return reply(f.body,f.status);}finally{requests--;}
-    },
-    error(){return reply({error:{code:"invalid_request",message:"The request could not be processed."}},400);},
-  });
+    }
+  }
   // Revalidate independently of a cooperative client's snapshot refresh. Only active targets are polled.
   let checkingIdentities=false;
   async function revalidateStreams() {
@@ -330,6 +347,18 @@ export function createBridge(options:BridgeOptions) {
     }finally{checkingIdentities=false;}
   }
   const identitySweep=setInterval(()=>{void revalidateStreams();},2000);identitySweep.unref();
+  // A change found by the watcher below makes every phone in that session fetch the snapshot at once:
+  // they share the watcher's read (or one fresh read) instead of each walking every pane again.
+  const recentSnapshots=new Map<string,{at:number;value:Promise<Record<string,unknown>>}>();
+  function snapshotOf(session:string|undefined):Promise<Record<string,unknown>> {
+    const key=session??"",hit=recentSnapshots.get(key),now=Date.now();
+    if(hit && now-hit.at<1000)return hit.value;
+    const value=backend.snapshot(session) as Promise<Record<string,unknown>>;
+    recentSnapshots.set(key,{at:now,value});
+    value.catch(()=>{if(recentSnapshots.get(key)?.value===value)recentSnapshots.delete(key);});
+    if(recentSnapshots.size>64)for(const [k,v]of recentSnapshots)if(now-v.at>=1000)recentSnapshots.delete(k);
+    return value;
+  }
   // Notify sockets only when their session's snapshot actually changes, instead of every tick.
   const fingerprints=new Map<string,string>();let watching=false;
   async function watchSnapshots() {
@@ -338,7 +367,7 @@ export function createBridge(options:BridgeOptions) {
       const sessions=new Set<string|undefined>();for(const ws of sockets)sessions.add(ws.data.session);
       for(const key of [...fingerprints.keys()])if(![...sessions].some(s=>(s??"")===key))fingerprints.delete(key);
       for(const session of sessions) {
-        let value:Record<string,unknown>;try{value=await deadline(backend.snapshot(session),3000);}catch{continue;}
+        let value:Record<string,unknown>;try{value=await deadline(snapshotOf(session),3000);}catch{continue;}
         if(stopped)return;
         const print=hash(canonical(value,new Set(["ts","revision"]))),key=session??"",previous=fingerprints.get(key);
         fingerprints.set(key,print);

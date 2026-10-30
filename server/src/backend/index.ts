@@ -25,6 +25,7 @@ export function createHerdrBackend(options:HerdrBackendOptions={}):HostBackend {
   if(!options.configDir&&configured) { const dir=dirname(configured);configDir=dirname(dir).endsWith('/sessions')?dirname(dirname(dir)):dir; }
   const primary=options.session??(configured&&dirname(dirname(configured)).endsWith('/sessions')?dirname(configured).split('/').at(-1):undefined)??'default';
   const epoch=options.epoch??randomUUID(); const handles=new Set<TerminalHandle>();let closed=false;let transcriptActive=0;
+  const discovered=new Map<string,{key:string;native:NativeSession|undefined;at:number}>();
   function selected(session?:string):string {const name=session||primary;if(!validName(name))throw new BackendError('invalid_session','Invalid session name',400);return name;}
   function socket(session:string):string {return session===primary&&configured?configured:session==='default'?join(configDir,'herdr.sock'):join(configDir,'sessions',session,'herdr.sock');}
   async function call(session:string,method:string,params:Record<string,unknown>={},write=false):Promise<any> {if(closed)throw new BackendError('backend_closed','Backend is closed');return rpc(socket(session),method,params,write);}
@@ -107,10 +108,21 @@ export function createHerdrBackend(options:HerdrBackendOptions={}):HostBackend {
         // or through a resume picker, have none, so look for their log here.
         if(!native&&before.p.agent){
           const cwd=before.p.foreground_cwd||before.p.cwd;
-          native=await discoverSession(before.p.agent,(before.process?.foreground_processes??[]).map((x:any)=>({pid:x.pid,name:x.name,cwd:x.cwd,argv:Array.isArray(x.argv)?x.argv:undefined})),
-            {codex:roots.codex??join(home,'.codex/sessions'),claude:roots.claude??join(home,'.claude/projects')},
-            {claimed:new Set(before.state.panes.map((x:any)=>x.agent_session?.value).filter(Boolean)),sharedFolder:before.state.panes.some((x:any)=>x.pane_id!==paneId&&x.agent===before.p.agent&&!x.agent_session&&(x.foreground_cwd||x.cwd)===cwd),title:typeof before.p.terminal_title_stripped==='string'?before.p.terminal_title_stripped:undefined,
-             screen:async()=>{const r=await call(name,'pane.read',{pane_id:paneId,source:'recent_unwrapped',format:'text',lines:400});return String((r.read??r).text??'');}});
+          const processes=(before.process?.foreground_processes??[]).map((x:any)=>({pid:x.pid,name:x.name,cwd:x.cwd,argv:Array.isArray(x.argv)?x.argv:undefined}));
+          const claimed=new Set<string>(before.state.panes.map((x:any)=>x.agent_session?.value).filter(Boolean));
+          const sharedFolder=before.state.panes.some((x:any)=>x.pane_id!==paneId&&x.agent===before.p.agent&&!x.agent_session&&(x.foreground_cwd||x.cwd)===cwd);
+          const title=typeof before.p.terminal_title_stripped==='string'?before.p.terminal_title_stripped:undefined;
+          // The search walks the agent's whole log folder; the phone polls every few seconds, so the answer is
+          // kept while the same processes, title and claims hold (a miss is retried after a short while).
+          const key=JSON.stringify([before.identity.identityToken,processes.map((x:any)=>[x.pid,x.cwd??null]),title??null,cwd,[...claimed].sort(),sharedFolder]);
+          const cached=discovered.get(`${name}\0${paneId}`);
+          if(cached&&cached.key===key&&(cached.native||Date.now()-cached.at<10_000))native=cached.native;
+          else {
+            native=await discoverSession(before.p.agent,processes,{codex:roots.codex??join(home,'.codex/sessions'),claude:roots.claude??join(home,'.claude/projects')},
+              {claimed,sharedFolder,title,screen:async()=>{const r=await call(name,'pane.read',{pane_id:paneId,source:'recent_unwrapped',format:'text',lines:400});return String((r.read??r).text??'');}});
+            if(discovered.size>=256)discovered.clear();
+            discovered.set(`${name}\0${paneId}`,{key,native,at:Date.now()});
+          }
         }
         const result=await readTranscript(home,native,before.identity.identityToken,cursor,roots,typeof tail==='string'?tail:tail===true);
         if((await pane(name,paneId)).identity.identityToken!==before.identity.identityToken)throw new BackendError('identity_changed','Pane identity changed during transcript read',409);

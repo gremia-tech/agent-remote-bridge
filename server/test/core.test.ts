@@ -194,3 +194,28 @@ test("keyboard bursts fit the authenticated device budget",async()=>{
  }
  expect(f.backend.commands).toHaveLength(150);
 });
+
+describe("response cost",()=>{
+  test("large JSON is gzipped for clients that accept it, small or unaccepted bodies are not",async()=>{
+    const f=fixture(),d=f.device("control");
+    f.backend.output=async()=>({paneId:"p",text:"the agent reads files and runs tests\n".repeat(400),truncated:false,revision:1,identityToken:f.backend.identityToken});
+    const headers={Authorization:`Bearer ${d.token}`};
+    const zipped=await fetch(`${f.base}/v1/panes/p/output`,{headers:{...headers,"Accept-Encoding":"gzip"},decompress:false});
+    expect(zipped.headers.get("content-encoding")).toBe("gzip");
+    const raw=new Uint8Array(await zipped.arrayBuffer());
+    expect(raw.length).toBeLessThan(2000);
+    expect(JSON.parse(new TextDecoder().decode(Bun.gunzipSync(raw))).text).toContain("runs tests");
+    const plain=await fetch(`${f.base}/v1/panes/p/output`,{headers:{...headers,"Accept-Encoding":"identity"},decompress:false});
+    expect(plain.headers.get("content-encoding")).toBeNull();expect((await plain.json() as any).text).toContain("runs tests");
+    const small=await fetch(`${f.base}/v1/snapshot`,{headers:{...headers,"Accept-Encoding":"gzip"},decompress:false});
+    expect(small.headers.get("content-encoding")).toBeNull();expect(small.status).toBe(200);
+  });
+  test("phones fetching right after a change share one snapshot read, and a change of their own is never served stale",async()=>{
+    const f=fixture(),d=f.device("control");let reads=0;
+    (f.backend as {snapshot:()=>Promise<Record<string,unknown>>}).snapshot=async()=>{reads++;await Bun.sleep(20);return {agents:[],shellPanes:[],workspaces:[],tabs:[],sessions:[],capabilities:{},read:reads};};
+    const results=await Promise.all(Array.from({length:4},()=>f.request("/v1/snapshot",d.token).then(r=>r.json() as Promise<any>)));
+    expect(reads).toBe(1);expect(new Set(results.map(r=>r.read))).toEqual(new Set([1]));
+    const created=await f.request("/v1/workspaces",d.token,"POST",{requestId:randomUUID(),cwd:"/tmp"});expect(created.status).toBe(200);
+    expect((await (await f.request("/v1/snapshot",d.token)).json() as any).read).toBe(2);
+  });
+});

@@ -78,8 +78,12 @@ export function createPlainBackend(options:PlainBackendOptions):HostBackend {
   function broadcast(p:Pane,bytes:Buffer){if(!p.viewers.size){p.seq++;return;}const frame={seq:p.seq++,full:false,width:p.cols,height:p.rows,bytes:bytes.toString('base64')};for(const v of p.viewers)v.emit(frame);}
   const settled=(p:Pane)=>new Promise<void>(done=>p.screen.write('',()=>done()));
 
-  /** One process-table read per snapshot: which program holds each terminal's foreground. */
-  function readForeground() {
+  /** One process-table read per snapshot: which program holds each terminal's foreground. `ps` blocks the
+   *  event loop (and every live frame) while it runs, so reads within `maxAge` ms of the last one reuse it:
+   *  a snapshot and the identity check of each watched terminal arrive together every couple of seconds. */
+  let foregroundAt=0;
+  function readForeground(maxAge=250) {
+    const now=Date.now();if(maxAge>0&&now-foregroundAt<maxAge)return;foregroundAt=now;
     const result=Bun.spawnSync(['ps','-A','-o','pid=,pgid=,tpgid=,comm=,args='],{stdout:'pipe',stderr:'ignore'});
     if(!result.success)return;
     const rows=result.stdout.toString().split('\n').map(line=>line.trim().split(/\s+/)).filter(r=>r.length>=4).map(r=>({pid:Number(r[0]),pgid:Number(r[1]),tpgid:Number(r[2]),comm:r[3]!,args:r.slice(4)}));
@@ -98,7 +102,7 @@ export function createPlainBackend(options:PlainBackendOptions):HostBackend {
   }
   function pane(id:unknown,expected?:string,refresh=true):Pane {
     const p=panes.get(text(id,'pane',128));if(!p||p.exited)throw new BackendError('pane_not_found','Terminal is not running',404);
-    if(expected){if(refresh)readForeground();if(identity(p).identityToken!==expected)throw new BackendError('identity_changed','Terminal identity changed',409);}
+    if(expected){if(refresh)readForeground(0);if(identity(p).identityToken!==expected)throw new BackendError('identity_changed','Terminal identity changed',409);}
     return p;
   }
   const checkSession=(session?:string)=>{if(stopped)throw new BackendError('backend_closed','Backend is closed');if(session&&session!=='default')throw new BackendError('invalid_session','Plain terminals have one session',400);};
