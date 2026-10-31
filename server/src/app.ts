@@ -6,6 +6,7 @@ import type { Lease } from "./control";
 import { BridgeError, failure } from "./errors";
 import { State, hash, canonical } from "./state";
 import type { Device, Scope } from "./state";
+import type { GatewayConnection } from "./connection";
 
 const MAX_BODY=65_536, MAX_RESPONSE=2_097_152, MAX_FILE_RESPONSE=8_388_608;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -59,7 +60,18 @@ export interface BridgeOptions {
    * a short code is shown only on the computer (announce) and typed on the phone.
    */
   nearby?:{scope:Scope;announce(request:{name:string;code:string;expiresAt:string}):void};
+  /**
+   * Relay-spliced streams arrive on their own loopback listener (`relayServer`), so they are never
+   * mistaken for this network: from the bridge's side they would otherwise all come from 127.0.0.1.
+   * `phoneURL` and `credentials()` let paired phones swap the relay's shared token for their own.
+   */
+  relay?:{gateway:GatewayConnection;credentials():boolean};
+  /** Addresses this computer can currently be reached at on the local network (`https://ip:port`). */
+  localRoutes?:()=>string[];
+  /** The serving certificate, and its signed successor while a renewal is pending. */
+  certificate?:()=>CertificateStatus;
 }
+export interface CertificateStatus {pin:string;expiresAt:string;next?:{pin:string;switchAt:string;statement:string;signature:string;previousCertificate:string};}
 interface NearbyRequest {id:string;name:string;code:string;expires:number;attempts:number;ip:string}
 /** Nearby pairing is for the same network only. */
 function localAddress(ip:string){const v=ip.replace(/^::ffff:/,"");return /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(v)||v==="::1"||/^(fe80|fc|fd)/i.test(v)||v==="local";}
@@ -197,9 +209,9 @@ export function createBridge(options:BridgeOptions) {
       return reply(state.finish(device.id,id,"accepted",result??null));
     }catch(error){const f=failure(error);const ambiguous=!(error instanceof Error && "deliveryAmbiguous" in error) || (error as BridgeError).deliveryAmbiguous;if(ambiguous)(f.body as {deliveryAmbiguous?:boolean}).deliveryAmbiguous=true;state.finish(device.id,id,ambiguous?"unknown":"failed",f.body);return reply(f.body,f.status);}
   }
-  const server=Bun.serve<SocketData>({
-    hostname:options.hostname??"127.0.0.1",port:options.port??0,tls:options.tls,
-    idleTimeout:30,maxRequestBodySize:MAX_BODY,
+  let relayServer:Bun.Server<SocketData>|undefined;
+  const listen=(hostname:string,port:number)=>Bun.serve<SocketData>({
+    hostname,port,tls:options.tls,idleTimeout:30,maxRequestBodySize:MAX_BODY,
     websocket:{maxPayloadLength:16_384,idleTimeout:60,backpressureLimit:1_048_576,closeOnBackpressureLimit:true,sendPings:true,
       // Terminal frames are text; clients that offer per-message deflate (Android) get them compressed.
       perMessageDeflate:true,
@@ -208,12 +220,14 @@ export function createBridge(options:BridgeOptions) {
       close(ws){sockets.delete(ws);clearStream(ws);},
     },
     async fetch(request,server) {
-      const response=await handle(request,server);
+      const response=await handle(request,server,server===relayServer);
       return response && compressed(request,response);
     },
     error(){return reply({error:{code:"invalid_request",message:"The request could not be processed."}},400);},
   });
-  async function handle(request:Request,server:Bun.Server<SocketData>):Promise<Response|undefined> {
+  const server=listen(options.hostname??"127.0.0.1",options.port??0);
+  if(options.relay)relayServer=listen("127.0.0.1",0);
+  async function handle(request:Request,server:Bun.Server<SocketData>,relayed:boolean):Promise<Response|undefined> {
     {
       if(++requests>64){requests--;return reply({error:{code:"rate_limited",message:"The host is busy."}},429);}
       try {
@@ -229,7 +243,7 @@ export function createBridge(options:BridgeOptions) {
         }
         if(url.pathname==="/v1/pair/nearby" && request.method==="POST") {
           if(!options.nearby || nearbyLocked())throw new BridgeError("unsupported","Nearby pairing is off",501);
-          if(!localAddress(ip))throw new BridgeError("forbidden","Nearby pairing is limited to the local network",403);
+          if(relayed || !localAddress(ip))throw new BridgeError("forbidden","Nearby pairing is limited to the local network",403);
           limiter.check(`nearby:${ip}`,4);const value=await body(request);only(value,["name"]);
           const now=Date.now();for(const [id,item]of nearby)if(item.expires<=now)nearby.delete(id);
           if(nearby.size>=8 || [...nearby.values()].filter(n=>n.ip===ip).length>=2)throw new BridgeError("rate_limited","Too many pairing requests",429);
@@ -240,7 +254,7 @@ export function createBridge(options:BridgeOptions) {
         }
         if(url.pathname==="/v1/pair/nearby/confirm" && request.method==="POST") {
           if(!options.nearby || nearbyLocked())throw new BridgeError("unsupported","Nearby pairing is off",501);
-          if(!localAddress(ip))throw new BridgeError("forbidden","Nearby pairing is limited to the local network",403);
+          if(relayed || !localAddress(ip))throw new BridgeError("forbidden","Nearby pairing is limited to the local network",403);
           limiter.check(`nearby-confirm:${ip}`,30);const value=await body(request);only(value,["requestId","code"]);
           const item=nearby.get(str(value.requestId,36)),code=str(value.code,6,6);
           if(!item || item.expires<=Date.now()){if(item)nearby.delete(item.id);throw new BridgeError("invitation_expired","Pairing request expired",410);}
@@ -248,7 +262,9 @@ export function createBridge(options:BridgeOptions) {
           if(!/^\d{6}$/.test(code) || !timingSafeEqual(Buffer.from(code),Buffer.from(item.code))){nearbyFailures.push(Date.now());throw new BridgeError("invalid_code","Wrong code",403);}
           nearby.delete(item.id);
           const result=state.pair(state.invite(options.nearby.scope,60).code,item.name);
-          return reply({hostId:state.hostId,hostName:options.hostName??"Herdr host",...result,protocolVersion:1},201);
+          // Paired at home, reachable away: a relayed bridge hands the phone its route with the phone's own credential.
+          const connection=options.relay?.credentials()?{mode:"gateway",gateway:{...options.relay.gateway,token:state.relayCredential(result.deviceId)}}:undefined;
+          return reply({hostId:state.hostId,hostName:options.hostName??"Herdr host",...result,protocolVersion:1,...(connection?{connection}:{})},201);
         }
         if(!url.pathname.startsWith("/v1/"))throw new BridgeError("not_found","Unknown route",404);
         const authorization=request.headers.get("authorization")??"";
@@ -257,6 +273,16 @@ export function createBridge(options:BridgeOptions) {
         const session=url.searchParams.has("session")?str(url.searchParams.get("session"),128):undefined;
         const paneId=url.searchParams.has("paneId")?str(url.searchParams.get("paneId")):undefined;
         const additional=await options.route?.(request,url,device);if(additional)return additional;
+        if(url.pathname==="/v1/relay/credential" && request.method==="POST") {
+          // Transport only: any paired device may replace the relay's shared token with its own.
+          if(!options.relay?.credentials())throw new BridgeError("unsupported","This relay does not issue device credentials",501);
+          limiter.check(`relay-credential:${device.id}`,5,600_000);
+          return reply({url:options.relay.gateway.url,token:state.relayCredential(device.id)},201);
+        }
+        if(url.pathname==="/v1/certificate" && request.method==="GET") {
+          if(!options.certificate)throw new BridgeError("unsupported","Certificate status unavailable",501);
+          return reply(options.certificate());
+        }
         if(url.pathname==="/v1/live" && request.method==="GET") {
           if([...sockets].filter(ws=>ws.data.device.id===device.id).length>=4 || sockets.size>=64)throw new BridgeError("rate_limited","Socket limit",429);
           if(server.upgrade(request,{data:{device,session,generation:0}}))return;
@@ -264,7 +290,7 @@ export function createBridge(options:BridgeOptions) {
         }
         const parts=url.pathname.split("/").filter(Boolean).map(part=>{try{return str(decodeURIComponent(part));}catch{throw new BridgeError("invalid_request","Malformed path");}});
         if(request.method==="GET") {
-          if(url.pathname==="/v1/snapshot"){const value=await deadline(snapshotOf(session));return reply({...value,capabilities:{...(value.capabilities as object|undefined),liveInput:true,hostSizedTerminal:!!backend.paneSize},hostId:state.hostId,epoch});}
+          if(url.pathname==="/v1/snapshot"){const value=await deadline(snapshotOf(session));return reply({...value,capabilities:{...(value.capabilities as object|undefined),liveInput:true,hostSizedTerminal:!!backend.paneSize,...(options.certificate?{certificateRenewal:true}:{}),...(options.relay?.credentials()?{relayCredential:true}:{})},...(options.localRoutes?{routes:{local:options.localRoutes()}}:{}),hostId:state.hostId,epoch});}
           if(parts[1]==="operations" && parts.length===3){if(!UUID.test(parts[2]!))throw new BridgeError("invalid_request","Invalid operation ID");return reply(state.operation(device.id,parts[2]!));}
           if(parts[1]==="panes" && parts.length===4){
             if(parts[3]==="output"){const lines=url.searchParams.has("lines")?integer(Number(url.searchParams.get("lines")),1,2000):240;return reply(await deadline(backend.output(session,parts[2]!,lines)));}
@@ -398,8 +424,8 @@ export function createBridge(options:BridgeOptions) {
     // A large Herdr session can take ~0.5s to snapshot; every other tick keeps that load modest.
     if(++tick%2===0)void followPaneSizes();else void watchSnapshots();
   },1000);sweep.unref();
-  return {server,controls,epoch,
+  return {server,relayServer,controls,epoch,
     revoke(device:string){state.revoke(device);controls.revoke(device);for(const ws of sockets)if(ws.data.device.id===device){clearStream(ws);ws.close(4001,"Device revoked");}},
-    close(){if(stopped)return;stopped=true;clearInterval(sweep);clearInterval(identitySweep);controls.close();for(const ws of sockets)ws.close(1001,"Server shutdown");backend.close();server.stop(true);},
+    close(){if(stopped)return;stopped=true;clearInterval(sweep);clearInterval(identitySweep);controls.close();for(const ws of sockets)ws.close(1001,"Server shutdown");backend.close();server.stop(true);relayServer?.stop(true);},
   };
 }

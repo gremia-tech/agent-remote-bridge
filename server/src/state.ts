@@ -26,23 +26,48 @@ export class State {
       CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS invitations (digest TEXT PRIMARY KEY,scope TEXT NOT NULL,expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY,name TEXT NOT NULL,scope TEXT NOT NULL,digest TEXT UNIQUE NOT NULL,created INTEGER NOT NULL,revoked INTEGER);
-      CREATE TABLE IF NOT EXISTS operations (device TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,result TEXT,created INTEGER NOT NULL,PRIMARY KEY(device,id));`);
+      CREATE TABLE IF NOT EXISTS operations (device TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,result TEXT,created INTEGER NOT NULL,PRIMARY KEY(device,id));
+      CREATE TABLE IF NOT EXISTS relay_credentials (digest TEXT PRIMARY KEY,invitation TEXT,device TEXT,expires INTEGER);`);
+    // Older state files predate multi-use invitations.
+    if (!(this.db.query("PRAGMA table_info(invitations)").all() as {name:string}[]).some(c=>c.name==="uses")) this.db.exec("ALTER TABLE invitations ADD COLUMN uses INTEGER NOT NULL DEFAULT 1");
     if (recover) this.db.query("UPDATE operations SET state='unknown' WHERE state='pending'").run();
     this.db.query("INSERT OR IGNORE INTO metadata VALUES ('hostId',?)").run(randomUUID());
   }
   get hostId() { return (this.db.query("SELECT value FROM metadata WHERE key='hostId'").get() as {value:string}).value; }
-  invite(scope: Scope, ttlSeconds=300) {
-    if (!["read","control"].includes(scope) || !Number.isInteger(ttlSeconds) || ttlSeconds<1 || ttlSeconds>3600) throw new BridgeError("invalid_request","Invalid invitation options");
-    const code=secret(), expiresAt=Date.now()+ttlSeconds*1000;
-    this.db.transaction(() => { this.db.query("DELETE FROM invitations WHERE expires<?").run(Date.now()); this.db.query("INSERT INTO invitations VALUES (?,?,?)").run(hash(code),scope,expiresAt); })();
-    return {code,expiresAt:new Date(expiresAt).toISOString()};
+  metadata(key:string) { return (this.db.query("SELECT value FROM metadata WHERE key=?").get(key) as {value:string}|null)?.value; }
+  setMetadata(key:string,value:string) { this.db.query("INSERT INTO metadata VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key,value); }
+  /** `relay` also mints this invitation's own relay credential; pairing binds it to the new device. */
+  /** `uses` > 1 and lifetimes beyond an hour are for owner-made invitations such as an app reviewer's (CLI only). */
+  invite(scope: Scope, ttlSeconds=300, relay=false, uses=1) {
+    if (!["read","control"].includes(scope) || !Number.isInteger(ttlSeconds) || ttlSeconds<1 || ttlSeconds>2_592_000 || !Number.isInteger(uses) || uses<1 || uses>20) throw new BridgeError("invalid_request","Invalid invitation options");
+    const code=secret(), expiresAt=Date.now()+ttlSeconds*1000, relayToken=relay?secret():undefined;
+    this.db.transaction(() => {
+      this.db.query("DELETE FROM invitations WHERE expires<?").run(Date.now());
+      this.db.query("DELETE FROM relay_credentials WHERE device IS NULL AND expires<?").run(Date.now());
+      this.db.query("INSERT INTO invitations (digest,scope,expires,uses) VALUES (?,?,?,?)").run(hash(code),scope,expiresAt,uses);
+      if (relayToken) this.db.query("INSERT INTO relay_credentials VALUES (?,?,NULL,?)").run(hash(relayToken),hash(code),expiresAt);
+    })();
+    return {code,expiresAt:new Date(expiresAt).toISOString(),...(relayToken?{relayToken}:{})};
   }
+  /** A fresh relay credential for an already paired device; it replaces the device's previous one. */
+  relayCredential(device:string) {
+    const token=secret();
+    this.db.transaction(() => { this.db.query("DELETE FROM relay_credentials WHERE device=?").run(device); this.db.query("INSERT INTO relay_credentials VALUES (?,NULL,?,NULL)").run(hash(token),device); })();
+    return token;
+  }
+  /** Digests the relay may admit: active devices' credentials and those of unexpired invitations. */
+  relayDigests(): string[] {
+    return (this.db.query("SELECT r.digest FROM relay_credentials r LEFT JOIN devices d ON d.id=r.device WHERE (r.device IS NOT NULL AND d.revoked IS NULL AND d.id IS NOT NULL) OR (r.device IS NULL AND r.expires>?) ORDER BY r.digest").all(Date.now()) as {digest:string}[]).map(r=>r.digest);
+  }
+  rename(id:string,name:string) { return this.db.query("UPDATE devices SET name=? WHERE id=?").run(name,id).changes>0; }
   pair(code:string,name:string) {
     return this.db.transaction(() => {
-      const invite=this.db.query("DELETE FROM invitations WHERE digest=? AND expires>? RETURNING scope").get(hash(code),Date.now()) as {scope:Scope}|null;
+      const invite=this.db.query("UPDATE invitations SET uses=uses-1 WHERE digest=? AND expires>? AND uses>0 RETURNING scope,uses").get(hash(code),Date.now()) as {scope:Scope;uses:number}|null;
       if (!invite) throw new BridgeError("invitation_expired","Invalid invitation",410);
+      if (invite.uses<=0) this.db.query("DELETE FROM invitations WHERE digest=?").run(hash(code));
       const id=randomUUID(),token=secret();
       this.db.query("INSERT INTO devices VALUES (?,?,?,?,?,NULL)").run(id,name,invite.scope,hash(token),Date.now());
+      this.db.query("UPDATE relay_credentials SET device=?,invitation=NULL,expires=NULL WHERE invitation=?").run(id,hash(code));
       return {deviceId:id,token,scope:invite.scope};
     }).immediate();
   }

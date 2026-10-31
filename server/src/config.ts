@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readFileSync, writeFileSync, lstatSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, writeFileSync, lstatSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { X509Certificate } from "node:crypto";
@@ -6,7 +6,11 @@ import { isIP } from "node:net";
 import { privateDirectory } from "./state";
 export interface Config {version:1;hostName:string;url:string;listen:string;port:number;herdr:string;backend?:'herdr'|'orca'|'plain';orcaConnection?:string;session?:string;certificate:string;key:string;
   /** Advertise on the local network (Bonjour) and allow code-confirmed nearby pairing. */
-  discoverable?:boolean;nearbyScope?:'read'|'control';}
+  discoverable?:boolean;nearbyScope?:'read'|'control';
+  /** Local web console: on by default, `false` turns it off; `consolePort` defaults to 8790. */
+  console?:boolean;consolePort?:number;
+  /** A bridge joined to a relay also accepts phones on this network unless this is `false`. */
+  localRoute?:boolean;}
 export function endpoint(value:string):URL {
   const url=new URL(value);
   if(url.protocol!=="https:" || url.username || url.password || url.search || url.hash || !["","/"].includes(url.pathname))throw new Error("Endpoint must be a root HTTPS URL without credentials, query, or fragment");
@@ -21,8 +25,15 @@ export function loadConfig(directory:string):Config {
   endpoint(config.url);
   if(config.backend!==undefined&&!['herdr','orca','plain'].includes(config.backend))throw new Error("Unknown backend");
   if(config.backend==="orca"&&typeof config.orcaConnection!=="string")throw new Error("Orca backend requires a private connection file");
+  if(config.consolePort!==undefined&&(!Number.isInteger(config.consolePort)||config.consolePort<1||config.consolePort>65535))throw new Error("Invalid console port");
   const key=lstatSync(config.key);if(!key.isFile() || key.isSymbolicLink() || (key.mode&0o077)!==0)throw new Error("TLS private key must be a private regular file (0600)");
   return config;
+}
+/** Write a validated config atomically (0600). */
+export function saveConfig(directory:string,config:Config) {
+  const path=join(directory,"config.json"),temporary=path+".tmp";
+  writeFileSync(temporary,JSON.stringify(config,null,2)+"\n",{mode:0o600});chmodSync(temporary,0o600);
+  renameSync(temporary,path);loadConfig(directory);
 }
 export function certificatePin(path:string) {return new X509Certificate(readFileSync(path)).fingerprint256.replaceAll(":","").toLowerCase();}
 export async function initialize(directory:string,options:{url:string;listen?:string;port?:number;herdr?:string;session?:string;hostName?:string;sans?:string[];backend?:'herdr'|'orca'|'plain';orcaConnection?:string;discoverable?:boolean}) {
