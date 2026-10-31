@@ -7,6 +7,31 @@ transcripts, and (with an explicit control lease) type into terminals. The phone
 talks directly to your computer over TLS with a pinned certificate; there is no
 hosted service.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/gremia-tech/agent-remote-bridge/main/install.sh | sh
+```
+
+The script picks the release kit for your Mac or Linux computer, checks it against the release's
+`SHA256SUMS` and installs `herdr-remote` into `~/.local/bin` (no sudo). Or use Homebrew:
+
+```sh
+brew tap gremia-tech/agent-remote-bridge https://github.com/gremia-tech/agent-remote-bridge
+brew install agent-remote-bridge
+```
+
+or the container image (Linux x86-64/ARM64), handy for running a relay:
+
+```sh
+docker run -d --name agent-remote-relay -p 8788:8788 -v agent-remote-relay:/state \
+  ghcr.io/gremia-tech/agent-remote-bridge relay serve --listen 0.0.0.0 --state /state
+```
+
+Kits for manual download are on the [releases page](https://github.com/gremia-tech/agent-remote-bridge/releases).
+Then run `herdr-remote up` (below). A local web console opens in your browser to change settings,
+pair phones and manage the relay (`--no-console` turns it off).
+
 ## Quick start (same Wi-Fi)
 
 Requires Herdr, OpenSSL and [Bun](https://bun.sh) 1.3.9+ (on Linux also `avahi-utils`

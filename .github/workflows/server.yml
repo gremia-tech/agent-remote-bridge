@@ -102,3 +102,52 @@ jobs:
             .github/scripts/component-release.sh notes server-v server
           } > notes.md
           gh release create "$tag" dist/*.zip dist/SHA256SUMS --target "$GITHUB_SHA" --title "Bridge $VERSION" --notes-file notes.md
+
+  # Container image of the released Linux kits: ghcr.io/gremia-tech/agent-remote-bridge:VERSION and :latest.
+  container:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [test, release]
+    runs-on: ubuntu-24.04
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: gh release download "server-v$VERSION" -p '*-linux-*.zip' -p SHA256SUMS -D dist && (cd dist && sha256sum --check --ignore-missing SHA256SUMS)
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ github.token }}" }
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: .github/container/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: VERSION=${{ needs.test.outputs.version }}
+          push: true
+          tags: |
+            ghcr.io/gremia-tech/agent-remote-bridge:${{ needs.test.outputs.version }}
+            ghcr.io/gremia-tech/agent-remote-bridge:latest
+      - run: docker run --rm "ghcr.io/gremia-tech/agent-remote-bridge:${{ needs.test.outputs.version }}" --help | grep -F "host ${{ needs.test.outputs.version }}"
+
+  # Homebrew formula kept in this repository's Formula/ folder:
+  #   brew tap gremia-tech/agent-remote-bridge https://github.com/gremia-tech/agent-remote-bridge
+  #   brew install agent-remote-bridge
+  homebrew:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [test, release]
+    runs-on: ubuntu-24.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          gh release download "server-v$VERSION" -p SHA256SUMS -D /tmp/dist
+          mkdir -p Formula && .github/scripts/homebrew-formula.sh "$VERSION" /tmp/dist/SHA256SUMS > Formula/agent-remote-bridge.rb
+          git add Formula && if git diff --cached --quiet; then exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "Homebrew formula for bridge $VERSION"
+          git pull -q --rebase origin main && git push -q origin HEAD:main
