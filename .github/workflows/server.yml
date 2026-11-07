@@ -5,7 +5,7 @@ name: Bridge release
 on:
   push:
     branches: [main]
-    paths: [server/**, protocol/**, .github/**]
+    paths: [server/**, protocol/**, .github/**, "!.github/workflows/publish-installer.yml"]
   pull_request:
     paths: [server/**, .github/workflows/server.yml]
   workflow_dispatch:

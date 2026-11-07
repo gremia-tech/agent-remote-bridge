@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install the AI Agent Remote bridge (herdr-remote) for this user, no sudo:
-#   curl -fsSL https://raw.githubusercontent.com/gremia-tech/agent-remote-bridge/main/install.sh | sh
+#   curl -fsSL https://crow.sg/apps/ai-agent-remote/install.sh | sh
 # Downloads the latest release kit for this computer, refuses it unless its SHA-256 matches the
 # release's SHA256SUMS, unpacks it under ~/.local/share/agent-remote-bridge/VERSION and links
 # ~/.local/bin/herdr-remote. AGENT_REMOTE_VERSION=0.1.N installs a specific release.

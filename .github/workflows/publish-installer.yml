@@ -1,0 +1,68 @@
+# Publish install.sh at https://crow.sg/apps/ai-agent-remote/install.sh, the URL the README and
+# the app's documentation give. It commits this repository's install.sh, unchanged, into the
+# crow.sg site repository (Crow-Tech-Pte-Ltd/crow-tech-landing), whose own pipeline deploys it,
+# then waits until crow.sg serves the same bytes.
+#
+# The `crow-sg` environment (deployments from main only) holds CROW_SG_DEPLOY_KEY: the private
+# half of an SSH deploy key with write access to the site repository and nothing else.
+name: Publish installer
+on:
+  push:
+    branches: [main]
+    paths: [install.sh, .github/workflows/publish-installer.yml]
+  workflow_dispatch:
+concurrency:
+  group: publish-installer
+  cancel-in-progress: false
+permissions: { contents: read }
+env:
+  INSTALLER_URL: https://crow.sg/apps/ai-agent-remote/install.sh
+  SITE_REPO: Crow-Tech-Pte-Ltd/crow-tech-landing
+  SITE_PATH: public/apps/ai-agent-remote/install.sh
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh -n install.sh && shellcheck -S warning -s sh install.sh
+      - name: Install the latest release with the script
+        run: |
+          HOME="$RUNNER_TEMP/home" sh install.sh
+          "$RUNNER_TEMP/home/.local/bin/herdr-remote" --help | head -n 3
+
+  publish:
+    needs: check
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: crow-sg
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: bridge }
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SITE_REPO }}
+          ssh-key: ${{ secrets.CROW_SG_DEPLOY_KEY }}
+          path: site
+      - name: Commit install.sh to the site
+        run: |
+          cp bridge/install.sh "site/$SITE_PATH"
+          cd site
+          git add "$SITE_PATH"
+          if git diff --cached --quiet; then echo "The site already has this install.sh."; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "AI Agent Remote installer from agent-remote-bridge@${GITHUB_SHA::7}"
+          for attempt in 1 2 3; do
+            git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0
+            sleep 10
+          done
+          exit 1
+      - name: Wait until crow.sg serves it
+        run: |
+          want=$(sha256sum bridge/install.sh | cut -d' ' -f1)
+          for _ in $(seq 60); do
+            got=$(curl -fsSL -H 'Cache-Control: no-cache' "$INSTALLER_URL?sha=$GITHUB_SHA" | sha256sum | cut -d' ' -f1 || true)
+            if [ "$got" = "$want" ]; then echo "$INSTALLER_URL serves $want"; exit 0; fi
+            sleep 20
+          done
+          echo "::error::$INSTALLER_URL does not serve install.sh $want after 20 minutes (last $got)"
+          exit 1

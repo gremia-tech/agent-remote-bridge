@@ -10,11 +10,13 @@ hosted service.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/gremia-tech/agent-remote-bridge/main/install.sh | sh
+curl -fsSL https://crow.sg/apps/ai-agent-remote/install.sh | sh
 ```
 
 The script picks the release kit for your Mac or Linux computer, checks it against the release's
-`SHA256SUMS` and installs `herdr-remote` into `~/.local/bin` (no sudo). Or use Homebrew:
+`SHA256SUMS` and installs `herdr-remote` into `~/.local/bin` (no sudo). crow.sg serves an exact
+copy of [`install.sh`](install.sh) from this repository (the *Publish installer* workflow keeps it
+in sync); the kits themselves come from this repository's GitHub Releases. Or use Homebrew:
 
 ```sh
 brew tap gremia-tech/agent-remote-bridge https://github.com/gremia-tech/agent-remote-bridge
