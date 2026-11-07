@@ -1,7 +1,7 @@
 # Publish install.sh at https://crow.sg/apps/ai-agent-remote/install.sh, the URL the README and
 # the app's documentation give. It commits this repository's install.sh, unchanged, into the
 # crow.sg site repository (Crow-Tech-Pte-Ltd/crow-tech-landing), whose own pipeline deploys it,
-# then waits until crow.sg serves the same bytes.
+# then waits until the site serves the same bytes.
 #
 # The `crow-sg` environment (deployments from main only) holds CROW_SG_DEPLOY_KEY: the private
 # half of an SSH deploy key with write access to the site repository and nothing else.
@@ -17,6 +17,7 @@ concurrency:
 permissions: { contents: read }
 env:
   INSTALLER_URL: https://crow.sg/apps/ai-agent-remote/install.sh
+  ORIGIN_URL: https://crow-tech-landing.pages.dev/apps/ai-agent-remote/install.sh
   SITE_REPO: Crow-Tech-Pte-Ltd/crow-tech-landing
   SITE_PATH: public/apps/ai-agent-remote/install.sh
 jobs:
@@ -56,13 +57,24 @@ jobs:
             sleep 10
           done
           exit 1
-      - name: Wait until crow.sg serves it
+      # crow.sg's Cloudflare bot protection answers GitHub-hosted runners with 403, so wait on the
+      # site's Pages production origin, which serves the same deployment, then try crow.sg itself.
+      - name: Wait until the site serves it
         run: |
           want=$(sha256sum bridge/install.sh | cut -d' ' -f1)
+          got=none
           for _ in $(seq 60); do
-            got=$(curl -fsSL -H 'Cache-Control: no-cache' "$INSTALLER_URL?sha=$GITHUB_SHA" | sha256sum | cut -d' ' -f1 || true)
-            if [ "$got" = "$want" ]; then echo "$INSTALLER_URL serves $want"; exit 0; fi
+            got=$(curl -fsSL "$ORIGIN_URL?sha=$GITHUB_SHA" | sha256sum | cut -d' ' -f1 || true)
+            if [ "$got" = "$want" ]; then echo "$ORIGIN_URL serves $want"; break; fi
             sleep 20
           done
-          echo "::error::$INSTALLER_URL does not serve install.sh $want after 20 minutes (last $got)"
-          exit 1
+          if [ "$got" != "$want" ]; then
+            echo "::error::$ORIGIN_URL does not serve install.sh $want after 20 minutes (last $got)"
+            exit 1
+          fi
+          status=$(curl -sS -o crow.sh -w '%{http_code}' "$INSTALLER_URL?sha=$GITHUB_SHA" || true)
+          if [ "$status" = 200 ] && [ "$(sha256sum < crow.sh | cut -d' ' -f1)" = "$want" ]; then
+            echo "$INSTALLER_URL serves $want"
+          else
+            echo "::notice::$INSTALLER_URL answered this runner with HTTP $status (Cloudflare blocks GitHub runner IPs); the Pages origin above is verified."
+          fi
