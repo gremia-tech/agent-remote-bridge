@@ -1,3 +1,9 @@
+> **This repository moved to [Crow-Tech-Pte-Ltd/agent-remote-bridge](https://github.com/Crow-Tech-Pte-Ltd/agent-remote-bridge)**
+> on 9 November 2026 and is archived. Its last release, 0.1.33, is the same as the new
+> repository's 0.1.33: bridges that update themselves move across on their own. Homebrew users:
+> `brew untap gremia-tech/agent-remote-bridge`, then
+> `brew tap crow-tech-pte-ltd/agent-remote-bridge https://github.com/Crow-Tech-Pte-Ltd/agent-remote-bridge`.
+
 # AI Agent Remote bridge
 
 The open-source host for **AI Agent Remote**, an iPhone/Android companion for
